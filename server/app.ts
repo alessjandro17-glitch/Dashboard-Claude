@@ -14,7 +14,7 @@ import {
 import { derive, median, METRIC_LABELS } from '../shared/metrics.js';
 import { HttpError, parse, upsertCreative } from './http.js';
 import { importRouter } from './import.js';
-import { advisorRouter } from './advisor.js';
+import { advisorRouter, type AdvisorClient } from './advisor.js';
 import { instagramRouter } from './instagram.js';
 
 const VIDEO_FIELDS = ['title', 'instagram_url', 'instagram_media_id', 'published_at', 'duration_seconds', 'category_id', 'subcategory_id', 'status', 'thumbnail_url', 'description', 'script'];
@@ -46,7 +46,7 @@ function validToken(secret: string, token: string | undefined) {
   return expected.length === token.length && crypto.timingSafeEqual(Buffer.from(expected), Buffer.from(token));
 }
 
-export function createApp(db: Db) {
+export function createApp(db: Db, opts: { advisorClient?: () => AdvisorClient } = {}) {
   const app = express();
   app.use(express.json({ limit: '15mb' }));
   app.use(cookieParser());
@@ -532,18 +532,19 @@ export function createApp(db: Db) {
   app.get('/api/status', async (_req, res) => {
     const url = process.env.DATABASE_URL || '';
     const host = (() => { try { return new URL(url).hostname; } catch { return 'desconocido'; } })();
-    const ig = (await db.query(`select status, last_sync_at, last_error from integrations where provider='instagram'`)).rows[0] || { status: 'no_configurada' };
+    const igRow = (await db.query(`select status, last_sync_at, last_error, config->>'username' as username from integrations where provider='instagram'`)).rows[0];
+    const ig = igRow || { status: 'no_configurada' };
     res.json({
       database: { engine: 'PostgreSQL', host, supabase: /supabase/.test(host), migrations: (await db.query('select name, applied_at from schema_migrations order by name')).rows },
       auth_enabled: !!password,
       advisor_configured: !!process.env.ANTHROPIC_API_KEY,
-      instagram: { ...ig, app_configured: !!(process.env.META_APP_ID && process.env.META_APP_SECRET) },
+      instagram: { ...ig, app_configured: !!(process.env.META_APP_ID && process.env.META_APP_SECRET && process.env.META_REDIRECT_URI) },
       min_group: MIN_GROUP, min_ranking: MIN_RANKING,
     });
   });
 
   app.use('/api/import', importRouter(db));
-  app.use('/api/advisor', advisorRouter(db));
+  app.use('/api/advisor', advisorRouter(db, opts.advisorClient));
   app.use('/api/instagram', instagramRouter(db));
 
   app.use('/api', (_req, res) => res.status(404).json({ error: 'Ruta no encontrada' }));
