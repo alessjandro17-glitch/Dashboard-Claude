@@ -45,6 +45,11 @@ function fakeInstagram(input: any): Promise<Response> {
   const u = new URL(String(input));
   igCalls.push(u.pathname + '?' + u.searchParams.get('metric'));
   if (!tokenValid) return Promise.resolve(json({ error: { message: 'Invalid OAuth access token', code: 190 } }, 400));
+  if (u.host === 'graph.facebook.com') {
+    if (u.pathname.endsWith('/me/accounts')) return Promise.resolve(json({ error: { message: 'Missing permission pages_show_list', code: 10 } }, 403));
+    if (u.pathname.endsWith('/17841')) return Promise.resolve(json({ id: '17841', username: 'mundo.curioso13', followers_count: 1600 }));
+    if (u.pathname.endsWith('/17841/media')) return Promise.resolve(json({ data: [{ id: 'm1', caption: 'Por qué el cielo es azul', media_type: 'VIDEO', media_product_type: 'REELS', permalink: 'https://www.instagram.com/reel/AAA/', timestamp: '2026-10-20T18:00:00+0000' }] }));
+  }
   if (u.pathname.endsWith('/me')) return Promise.resolve(json({ user_id: '178', username: 'mundo.curioso13', account_type: 'MEDIA_CREATOR', followers_count: 1520 }));
   if (u.pathname.endsWith('/me/media')) return Promise.resolve(json({ data: [
     { id: 'm1', caption: 'Por qué el cielo es azul\n#ciencia', media_type: 'VIDEO', media_product_type: 'REELS', permalink: 'https://www.instagram.com/reel/AAA/', timestamp: '2026-10-20T18:00:00+0000' },
@@ -194,11 +199,25 @@ describe('Instagram', () => {
     expect((await call('GET', '/api/instagram/status')).body.status).toBe('token_caducado');
     tokenValid = true;
   });
+  it('acepta un token de usuario del sistema (EAA…) con el ID de la cuenta', async () => {
+    const tok = 'EAA' + 'y'.repeat(40);
+    const sinId = await call('POST', '/api/instagram/token', { access_token: tok });
+    expect(sinId.status).toBe(400);
+    expect(sinId.body.error).toContain('ID de la cuenta de Instagram');
+    const r = await call('POST', '/api/instagram/token', { access_token: tok, ig_user_id: '17841' });
+    expect(r.status).toBe(200);
+    expect(r.body).toMatchObject({ status: 'conectada', api: 'facebook', username: 'mundo.curioso13' });
+    views = 2000;
+    const s = await call('POST', '/api/instagram/sync', { all: true });
+    expect(s.status).toBe(200);
+    expect(s.body).toMatchObject({ reels: 1, snapshots_created: 1, followers_count: 1600 });
+    expect(igCalls.some((c) => c.startsWith('/v25.0/m1/insights'))).toBe(true);
+  });
   it('desconectar borra el token y conserva las mediciones', async () => {
     const r = await call('POST', '/api/instagram/disconnect');
     expect(r.body.status).toBe('no_configurada');
     const row = (await db.query(`select config from integrations where provider='instagram'`)).rows[0];
     expect(row.config).toEqual({});
-    expect(Number((await db.query(`select count(*) from video_metrics_snapshots where source='instagram'`)).rows[0].count)).toBe(3);
+    expect(Number((await db.query(`select count(*) from video_metrics_snapshots where source='instagram'`)).rows[0].count)).toBe(4);
   });
 });

@@ -13,6 +13,8 @@ import { HttpError } from './http.js';
  * Sin scraping: solo endpoints documentados por Meta.
  */
 export const GRAPH = 'https://graph.instagram.com';
+// Las apps nuevas de Meta solo ofrecen el «inicio de sesión unificado»: tokens de Facebook (EAA…) contra graph.facebook.com.
+export const FB_GRAPH = 'https://graph.facebook.com';
 export const GRAPH_VERSION = 'v25.0';
 export const SCOPES = ['instagram_business_basic', 'instagram_business_manage_insights'];
 // Métricas de Reels documentadas. impressions/plays/video_views están obsoletas para Reels.
@@ -88,16 +90,35 @@ async function token(db: Db) {
   return { row, token: decrypt(row.config.token) };
 }
 
-/** Comprueba el token con /me y lo guarda cifrado. */
-export async function storeToken(db: Db, accessToken: string, expiresIn: number | null, via: 'oauth' | 'manual') {
-  const me = await graph('/me', { fields: 'user_id,username,account_type,followers_count,media_count', access_token: accessToken });
+/** Tipo de API según el token: «instagram» (IGAA…, graph.instagram.com) o «facebook» (EAA…, graph.facebook.com). */
+export const apiFor = (token: string): 'instagram' | 'facebook' => (token.startsWith('EAA') ? 'facebook' : 'instagram');
+const baseFor = (api: string) => (api === 'facebook' ? `${FB_GRAPH}/${GRAPH_VERSION}` : `${GRAPH}/${GRAPH_VERSION}`);
+
+/** Con un token de Facebook hay que conocer el ID de la cuenta de Instagram: se usa el indicado o se busca en las páginas. */
+async function resolveFacebookIgId(tok: string, given?: string | null) {
+  if (given) return given;
+  try {
+    const r = await graph('/me/accounts', { fields: 'instagram_business_account{id,username}', access_token: tok }, { base: baseFor('facebook') });
+    const found = (r.data || []).map((p: any) => p.instagram_business_account).find(Boolean);
+    if (found?.id) return String(found.id);
+  } catch { /* sin acceso a páginas: se pide el ID */ }
+  throw new HttpError(400, 'Con este tipo de token (EAA…) también hace falta el ID de la cuenta de Instagram. Lo ves en business.facebook.com → Configuración → Cuentas → Cuentas de Instagram.');
+}
+
+/** Comprueba el token y lo guarda cifrado. */
+export async function storeToken(db: Db, accessToken: string, expiresIn: number | null, via: 'oauth' | 'manual', igUserId?: string | null) {
+  const api = apiFor(accessToken);
+  const igId = api === 'facebook' ? await resolveFacebookIgId(accessToken, igUserId) : null;
+  const me = api === 'facebook'
+    ? { ...(await graph(`/${igId}`, { fields: 'id,username,followers_count,media_count', access_token: accessToken }, { base: baseFor(api) })), user_id: igId }
+    : await graph('/me', { fields: 'user_id,username,account_type,followers_count,media_count', access_token: accessToken });
   if (me.account_type && !['BUSINESS', 'MEDIA_CREATOR', 'CREATOR'].includes(String(me.account_type).toUpperCase())) {
     throw new HttpError(400, `La cuenta @${me.username} no es profesional (tipo ${me.account_type}). Cámbiala a cuenta de creador o empresa en Instagram.`);
   }
   await saveRow(db, {
     status: 'conectada', last_error: null,
     config: {
-      token: encrypt(accessToken), via,
+      token: encrypt(accessToken), via, api, ig_user_id: igId,
       user_id: me.user_id ?? me.id, username: me.username, account_type: me.account_type ?? null,
       token_obtained_at: new Date().toISOString(),
       token_expires_at: expiresIn ? new Date(Date.now() + expiresIn * 1000).toISOString() : null,
@@ -110,6 +131,7 @@ export async function storeToken(db: Db, accessToken: string, expiresIn: number 
 
 /** Los tokens de larga duración duran 60 días; se renuevan si tienen más de 24 h. */
 async function maybeRefresh(db: Db, row: any, tok: string) {
+  if (row.config.api === 'facebook') return tok; // los tokens de usuario del sistema no caducan
   const obtained = row.config.token_obtained_at ? new Date(row.config.token_obtained_at).getTime() : 0;
   if (Date.now() - obtained < 24 * 3600_000) return tok;
   try {
@@ -122,7 +144,7 @@ async function maybeRefresh(db: Db, row: any, tok: string) {
 }
 
 /** Pide las métricas juntas; si Instagram rechaza alguna, las pide de una en una y omite las no disponibles. */
-async function mediaInsights(mediaId: string, tok: string) {
+async function mediaInsights(mediaId: string, tok: string, base: string) {
   const out: Record<string, number> = {};
   const read = (data: any[]) => {
     for (const m of data || []) {
@@ -131,11 +153,11 @@ async function mediaInsights(mediaId: string, tok: string) {
     }
   };
   try {
-    read((await graph(`/${mediaId}/insights`, { metric: REEL_METRICS.join(','), access_token: tok })).data);
+    read((await graph(`/${mediaId}/insights`, { metric: REEL_METRICS.join(','), access_token: tok }, { base })).data);
   } catch (e) {
     if (!(e instanceof GraphError) || e.status === 401 || e.code === 190) throw e;
     for (const metric of REEL_METRICS) {
-      try { read((await graph(`/${mediaId}/insights`, { metric, access_token: tok })).data); } catch (e2) {
+      try { read((await graph(`/${mediaId}/insights`, { metric, access_token: tok }, { base })).data); } catch (e2) {
         if (e2 instanceof GraphError && (e2.status === 401 || e2.code === 190)) throw e2;
       }
     }
@@ -160,7 +182,10 @@ export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; 
   const tok = await maybeRefresh(db, row, t0);
   const result: SyncResult = { media_seen: 0, reels: 0, videos_created: 0, snapshots_created: 0, unchanged: 0, failed: [], followers_count: null };
   try {
-    const me = await graph('/me', { fields: 'user_id,username,followers_count,media_count', access_token: tok });
+    const api = row.config.api === 'facebook' ? 'facebook' : 'instagram';
+    const base = baseFor(api);
+    const node = api === 'facebook' ? row.config.ig_user_id : 'me';
+    const me = await graph(`/${node}`, { fields: api === 'facebook' ? 'id,username,followers_count,media_count' : 'user_id,username,followers_count,media_count', access_token: tok }, { base });
     const account = (await db.query('select id from accounts order by created_at limit 1')).rows[0];
     if (typeof me.followers_count === 'number' && account) {
       result.followers_count = me.followers_count;
@@ -172,7 +197,7 @@ export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; 
     const cutoff = opts.maxAgeDays ? Date.now() - opts.maxAgeDays * 86400_000 : null;
     const max = opts.maxMedia ?? 1000;
     let next: string | null = null;
-    let page: any = await graph('/me/media', { fields: 'id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url', limit: '50', access_token: tok });
+    let page: any = await graph(`/${node}/media`, { fields: 'id,caption,media_type,media_product_type,permalink,timestamp,thumbnail_url', limit: '50', access_token: tok }, { base });
     const capturedAt = new Date();
     outer: while (page) {
       for (const m of page.data || []) {
@@ -185,7 +210,7 @@ export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; 
         try {
           const video = await upsertVideo(db, m, account?.id);
           if (video.created) result.videos_created++;
-          const ins = await mediaInsights(m.id, tok);
+          const ins = await mediaInsights(m.id, tok, base);
           const snap = {
             views: ins.views ?? null, reach: ins.reach ?? null, likes: ins.likes ?? null, comments: ins.comments ?? null,
             shares: ins.shares ?? null, saves: ins.saved ?? null,
@@ -278,6 +303,7 @@ const publicStatus = (row: any) => ({
   username: row?.config?.username ?? null,
   account_type: row?.config?.account_type ?? null,
   via: row?.config?.via ?? null,
+  api: row?.config?.api ?? null,
   token_expires_at: row?.config?.token_expires_at ?? null,
   metrics: REEL_METRICS,
   sync_hours: Number(process.env.INSTAGRAM_SYNC_HOURS ?? 6),
@@ -291,8 +317,9 @@ export function instagramRouter(db: Db) {
   router.post('/token', async (req, res) => {
     const t = typeof req.body?.access_token === 'string' ? req.body.access_token.trim() : '';
     if (t.length < 20) throw new HttpError(400, 'Pega un token de acceso de Instagram válido.');
+    const igId = typeof req.body?.ig_user_id === 'string' && /^\d{5,25}$/.test(req.body.ig_user_id.trim()) ? req.body.ig_user_id.trim() : null;
     try {
-      await storeToken(db, t, null, 'manual');
+      await storeToken(db, t, null, 'manual', igId);
     } catch (e) {
       if (e instanceof GraphError) throw new HttpError(400, `Instagram rechazó el token: ${e.message}`);
       throw e;

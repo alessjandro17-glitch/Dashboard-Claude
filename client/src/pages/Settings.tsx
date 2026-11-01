@@ -129,6 +129,8 @@ function InstagramCard({ onChange }: { onChange: () => void }) {
   const st = useApi<any>('/api/instagram/status');
   const [params] = useSearchParams();
   const [token, setToken] = useState('');
+  const [igId, setIgId] = useState('');
+  const isFb = token.trim().startsWith('EAA');
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<any>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -161,10 +163,15 @@ function InstagramCard({ onChange }: { onChange: () => void }) {
             </div>
           ) : (
             <>
-              <form className="stack" onSubmit={(e) => { e.preventDefault(); run('token', async () => { await api.post('/api/instagram/token', { access_token: token }); setToken(''); toast('Instagram conectado'); }); }}>
-                <Field label="Token de acceso de Instagram" wide hint={<>Panel de Meta para desarrolladores → tu app → Instagram → «Configuración de la API con inicio de sesión de Instagram» → «Generar tokens de acceso». Se guarda cifrado.</>}>
-                  <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} placeholder="IGAA…" />
+              <form className="stack" onSubmit={(e) => { e.preventDefault(); run('token', async () => { await api.post('/api/instagram/token', { access_token: token, ig_user_id: igId.trim() || undefined }); setToken(''); setIgId(''); toast('Instagram conectado'); }); }}>
+                <Field label="Token de acceso" wide hint={<>Token de Instagram (IGAA…) o, en apps nuevas de Meta, token de usuario del sistema (EAA…) generado en business.facebook.com → Usuarios del sistema, con los permisos instagram_basic e instagram_manage_insights. Se guarda cifrado.</>}>
+                  <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} placeholder="IGAA… o EAA…" />
                 </Field>
+                {isFb && (
+                  <Field label="ID de la cuenta de Instagram" hint="business.facebook.com → Configuración → Cuentas → Cuentas de Instagram. Solo números.">
+                    <input inputMode="numeric" value={igId} onChange={(e) => setIgId(e.target.value)} placeholder="17841400000000000" />
+                  </Field>
+                )}
                 <div className="row">
                   <button className="btn-primary" disabled={!!busy || token.trim().length < 20}>{busy === 'token' ? 'Comprobando…' : 'Conectar con token'}</button>
                   {d.app_configured && <a className="btn" href="/api/instagram/connect">Conectar con Instagram (OAuth)</a>}
