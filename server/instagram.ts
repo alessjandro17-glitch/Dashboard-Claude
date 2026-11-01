@@ -146,6 +146,7 @@ async function maybeRefresh(db: Db, row: any, tok: string) {
 /** Pide las métricas juntas; si Instagram rechaza alguna, las pide de una en una y omite las no disponibles. */
 async function mediaInsights(mediaId: string, tok: string, base: string) {
   const out: Record<string, number> = {};
+  const errors: string[] = [];
   const read = (data: any[]) => {
     for (const m of data || []) {
       const v = m.total_value?.value ?? m.values?.[0]?.value;
@@ -159,9 +160,11 @@ async function mediaInsights(mediaId: string, tok: string, base: string) {
     for (const metric of REEL_METRICS) {
       try { read((await graph(`/${mediaId}/insights`, { metric, access_token: tok }, { base })).data); } catch (e2) {
         if (e2 instanceof GraphError && (e2.status === 401 || e2.code === 190)) throw e2;
+        errors.push(`${metric}: ${(e2 as Error).message}`);
       }
     }
   }
+  if (!Object.keys(out).length && errors.length) throw new Error(`Instagram no devolvió métricas. ${errors[0]}`);
   return out;
 }
 
@@ -229,7 +232,7 @@ export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; 
       next = page.paging?.next ?? null;
       page = next ? await graph(next, {}) : null;
     }
-    await saveRow(db, { status: 'conectada', last_sync_at: new Date(), last_error: result.failed.length ? `${result.failed.length} Reels sin métricas en la última sincronización` : null });
+    await saveRow(db, { status: 'conectada', last_sync_at: new Date(), last_error: result.failed.length ? `${result.failed.length} Reels sin métricas en la última sincronización. Primer error: ${result.failed[0].error}` : null });
     await audit(db, 'integracion', 'instagram', 'importar', result);
     return result;
   } catch (e) {

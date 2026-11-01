@@ -184,7 +184,7 @@ function InstagramCard({ onChange }: { onChange: () => void }) {
             <div className="notice">
               {result.reels} Reels revisados · {result.videos_created} videos nuevos · {result.snapshots_created} mediciones nuevas · {result.unchanged} sin cambios
               {result.followers_count !== null && <> · {fmtInt(result.followers_count)} seguidores</>}
-              {result.failed.length > 0 && <> · {result.failed.length} sin métricas</>}
+              {result.failed.length > 0 && <> · {result.failed.length} sin métricas. Error: {result.failed[0].error}</>}
             </div>
           )}
           <p className="hint">Se importan, por Reel: reproducciones, alcance, me gusta, comentarios, compartidos, guardados y tiempos de reproducción. La API no da impresiones, visitas al perfil ni seguidores por Reel: regístralos a mano si los necesitas. Instagram puede tardar hasta 48 h en consolidar las cifras. Sin scraping.</p>
