@@ -52,6 +52,28 @@ npm start                     # sirve la API y la web en el puerto PORT
 - **Patrones:** comparación de cada grupo con el resto (Mann-Whitney), muestra mínima de 5 videos por lado y corrección de Benjamini-Hochberg (q < 0,10). Se presentan como asociaciones, no como causas.
 - **Ranking:** puntuación z robusta (mediana y MAD) frente al historial de la propia cuenta, sin umbrales fijos de viralidad.
 
+## AI Advisor (Claude)
+
+1. Crea una clave en https://platform.claude.com (API Keys) y añádela al `.env`: `ANTHROPIC_API_KEY=...`.
+2. Reinicia la app. En **AI Advisor** puedes preguntar, generar ideas y generar guiones.
+
+El asistente usa el modelo `claude-opus-5-5` y recibe solo lo guardado en la base de datos: videos con atributos y su última medición, patrones activos, experimentos, recomendaciones, decisiones y métricas de la cuenta. Tiene instrucciones de no inventar datos, de distinguir correlación y causalidad y de avisar cuando la muestra es pequeña. Cada respuesta se guarda en `ai_insights`. Las peticiones usan `fallbacks: "default"` (beta `server-side-fallback-2026-07-01`): si el modelo rechaza una petición, la API la reintenta con el modelo de respaldo recomendado.
+
+## Instagram (API oficial de Meta)
+
+Usa la **API de Instagram con inicio de sesión de Instagram** (`graph.instagram.com`), con permisos `instagram_business_basic` e `instagram_business_manage_insights`. Necesitas una cuenta profesional (creador o empresa). Sin scraping.
+
+1. En https://developers.facebook.com crea una app de tipo *Empresa* y añade el producto **Instagram → Configuración de la API con inicio de sesión de Instagram**.
+2. Añade tu cuenta de Instagram como evaluadora (rol *Instagram Tester*) y acepta la invitación en Instagram (Configuración → Apps y sitios web).
+3. Pulsa **Generar token** junto a tu cuenta, cópialo y pégalo en **Configuración → Integraciones**. Se guarda cifrado (AES-256-GCM); la clave de cifrado está en `INTEGRATIONS_SECRET` o en `.secrets/integrations.key`, nunca en la base de datos.
+4. Pulsa **Sincronizar todo el historial**. Después la app sincroniza sola cada `INSTAGRAM_SYNC_HOURS` horas los Reels de los últimos 60 días.
+
+**Apps nuevas de Meta (inicio de sesión unificado).** Desde 2026 las apps nuevas no pueden usar el inicio de sesión de Instagram. En ese caso: conecta un portfolio comercial a la app, añade la cuenta de Instagram al portfolio (business.facebook.com → Cuentas → Cuentas de Instagram), crea un **usuario del sistema**, asígnale la app y la cuenta, y genera un token (caducidad «Nunca») con `instagram_basic` e `instagram_manage_insights`. Pega ese token (EAA…) y el ID de la cuenta de Instagram en Configuración → Integraciones. La app usa entonces `graph.facebook.com` con las mismas métricas.
+
+Alternativa: OAuth completo con `META_APP_ID`, `META_APP_SECRET` y `META_REDIRECT_URI` (Meta exige una URL HTTPS registrada en la app).
+
+Qué se importa por Reel: reproducciones (`views`), alcance, me gusta, comentarios, compartidos, guardados, tiempo promedio y tiempo total de reproducción (Instagram los da en milisegundos y se guardan en segundos). Cada sincronización crea una medición nueva con fuente «instagram» solo si los valores cambiaron. La API no ofrece impresiones, visitas al perfil ni seguidores por Reel: siguen pudiéndose registrar a mano. De la cuenta se guardan los seguidores del día. Los Reels que no existan se crean con la primera línea del texto como título; los ya registrados se enlazan por URL.
+
 ## Pruebas
 
 ```bash
@@ -73,4 +95,4 @@ tests/    pruebas unitarias y de integración
 ## Hoja de ruta
 
 - **Fase 1 (hecha):** persistencia, registro manual, importación CSV, analítica, ranking, patrones, laboratorio, memoria, informes.
-- **Fase 2:** integración oficial con la Instagram Graph API (OAuth de Meta, sin scraping) y AI Advisor con Claude, usando solo los datos almacenados.
+- **Fase 2 (hecha, pendiente de probar con la cuenta real):** integración oficial con Instagram y AI Advisor con Claude, usando solo los datos almacenados.

@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { api, errorText } from '../api';
 import { Card, ErrorNote, Field, PageHead, SortTable, Tabs, toast, useApi } from '../components/ui';
 import { fmtDate, fmtInt } from '../format';
@@ -56,7 +56,8 @@ function AccountMetrics() {
 }
 
 export default function Settings() {
-  const [tab, setTab] = useState('cuenta');
+  const [params] = useSearchParams();
+  const [tab, setTab] = useState(params.get('tab') || 'cuenta');
   const status = useApi<any>('/api/status');
   const account = useApi<any>('/api/account');
   const [handle, setHandle] = useState('');
@@ -81,14 +82,10 @@ export default function Settings() {
       )}
       {tab === 'integraciones' && s && (
         <div className="grid grid-2">
-          <Card title="Instagram Graph API (Meta)">
-            <p>Estado: <span className="badge warn">{s.instagram.status === 'no_configurada' ? 'No configurada' : s.instagram.status}</span></p>
-            <p className="small">La integración oficial se implementará en la fase 2 mediante OAuth de Meta, con una cuenta profesional (creador o empresa). No se usa scraping ni métodos no autorizados. Las métricas que la API no ofrezca seguirán pudiendo registrarse a mano.</p>
-            <p className="small muted">Credenciales de la app de Meta en el servidor: {s.instagram.app_configured ? 'configuradas' : 'no configuradas'}.</p>
-          </Card>
+          <InstagramCard onChange={status.reload} />
           <Card title="AI Advisor (Claude)">
             <p>Estado: <span className={`badge ${s.advisor_configured ? 'alta' : 'warn'}`}>{s.advisor_configured ? 'Clave configurada' : 'No configurado'}</span></p>
-            <p className="small">Se activará en la fase 2. La clave se guarda solo en el servidor (variable de entorno), nunca en el navegador.</p>
+            <p className="small">{s.advisor_configured ? <>Listo. Úsalo en <Link to="/advisor">AI Advisor</Link>.</> : <>Añade <code>ANTHROPIC_API_KEY=…</code> al archivo <code>.env</code> del servidor y reinicia la app.</>} La clave se guarda solo en el servidor, nunca en el navegador.</p>
           </Card>
         </div>
       )}
@@ -118,5 +115,82 @@ export default function Settings() {
         </Card>
       )}
     </>
+  );
+}
+
+const IG_STATUS: Record<string, [string, string]> = {
+  no_configurada: ['No conectada', 'warn'], conectada: ['Conectada', 'alta'], token_caducado: ['Token caducado', 'warn'], error: ['Error', 'warn'],
+};
+const IG_RETURN: Record<string, string> = {
+  ok: 'Cuenta de Instagram conectada.', cancelado: 'Conexión cancelada en Instagram.', estado_invalido: 'La conexión no se pudo verificar. Vuelve a intentarlo.', error: 'Instagram rechazó la conexión. Mira el detalle del error abajo.',
+};
+
+function InstagramCard({ onChange }: { onChange: () => void }) {
+  const st = useApi<any>('/api/instagram/status');
+  const [params] = useSearchParams();
+  const [token, setToken] = useState('');
+  const [igId, setIgId] = useState('');
+  const isFb = token.trim().startsWith('EAA');
+  const [busy, setBusy] = useState<string | null>(null);
+  const [result, setResult] = useState<any>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const d = st.data;
+  const returned = params.get('instagram');
+  async function run(name: string, fn: () => Promise<any>) {
+    setErr(null); setBusy(name);
+    try { await fn(); st.reload(); onChange(); } catch (x) { setErr(errorText(x)); st.reload(); } finally { setBusy(null); }
+  }
+  const [label, cls] = IG_STATUS[d?.status] ?? [d?.status, 'warn'];
+  return (
+    <Card title="Instagram (API oficial de Meta)">
+      {!d ? <p className="small muted">Cargando…</p> : (
+        <div className="stack">
+          {returned && IG_RETURN[returned] && <div className={`notice ${returned === 'ok' ? '' : 'warn'}`}>{IG_RETURN[returned]}</div>}
+          <p>Estado: <span className={`badge ${cls}`}>{label}</span>{d.username && <> · <strong>@{d.username}</strong></>}</p>
+          {d.status === 'conectada' && (
+            <dl className="dl">
+              <dt>Última sincronización</dt><dd>{d.last_sync_at ? fmtDate(d.last_sync_at, true) : 'Nunca'}</dd>
+              <dt>Automática</dt><dd>{d.sync_hours > 0 ? `cada ${d.sync_hours} h (Reels de los últimos 60 días)` : 'desactivada'}</dd>
+              {d.token_expires_at && <><dt>Token caduca</dt><dd>{fmtDate(d.token_expires_at)} (se renueva solo al sincronizar)</dd></>}
+            </dl>
+          )}
+          {d.last_error && <div className="notice warn">{d.last_error}</div>}
+          {d.status === 'conectada' ? (
+            <div className="row">
+              <button className="btn-primary" disabled={!!busy} onClick={() => run('sync', async () => setResult(await api.post('/api/instagram/sync', {})))}>{busy === 'sync' ? 'Sincronizando…' : 'Sincronizar ahora'}</button>
+              <button disabled={!!busy} onClick={() => run('all', async () => setResult(await api.post('/api/instagram/sync', { all: true })))}>{busy === 'all' ? 'Sincronizando…' : 'Sincronizar todo el historial'}</button>
+              <button className="btn-ghost" disabled={!!busy} onClick={() => { if (confirm('¿Desconectar Instagram? Las mediciones ya guardadas se conservan.')) run('off', () => api.post('/api/instagram/disconnect')); }}>Desconectar</button>
+            </div>
+          ) : (
+            <>
+              <form className="stack" onSubmit={(e) => { e.preventDefault(); run('token', async () => { await api.post('/api/instagram/token', { access_token: token, ig_user_id: igId.trim() || undefined }); setToken(''); setIgId(''); toast('Instagram conectado'); }); }}>
+                <Field label="Token de acceso" wide hint={<>Token de Instagram (IGAA…) o, en apps nuevas de Meta, token de usuario del sistema (EAA…) generado en business.facebook.com → Usuarios del sistema, con los permisos instagram_basic e instagram_manage_insights. Se guarda cifrado.</>}>
+                  <input type="password" autoComplete="off" value={token} onChange={(e) => setToken(e.target.value)} placeholder="IGAA… o EAA…" />
+                </Field>
+                {isFb && (
+                  <Field label="ID de la cuenta de Instagram" hint="business.facebook.com → Configuración → Cuentas → Cuentas de Instagram. Solo números.">
+                    <input inputMode="numeric" value={igId} onChange={(e) => setIgId(e.target.value)} placeholder="17841400000000000" />
+                  </Field>
+                )}
+                <div className="row">
+                  <button className="btn-primary" disabled={!!busy || token.trim().length < 20}>{busy === 'token' ? 'Comprobando…' : 'Conectar con token'}</button>
+                  {d.app_configured && <a className="btn" href="/api/instagram/connect">Conectar con Instagram (OAuth)</a>}
+                </div>
+              </form>
+            </>
+          )}
+          <ErrorNote error={err} />
+          {result && (
+            <div className="notice">
+              {result.reels} Reels revisados · {result.videos_created} videos nuevos · {result.snapshots_created} mediciones nuevas · {result.unchanged} sin cambios
+              {result.followers_count !== null && <> · {fmtInt(result.followers_count)} seguidores</>}
+              {result.account_days > 0 && <> · {result.account_days} días de métricas de cuenta</>}
+              {result.failed.length > 0 && <> · {result.failed.length} sin métricas. Error: {result.failed[0].error}</>}
+            </div>
+          )}
+          <p className="hint">Se importan, por Reel: reproducciones, alcance, me gusta, comentarios, compartidos, guardados y tiempos de reproducción. La API no da impresiones, visitas al perfil ni seguidores por Reel: regístralos a mano si los necesitas. Instagram puede tardar hasta 48 h en consolidar las cifras. Sin scraping.</p>
+        </div>
+      )}
+    </Card>
   );
 }
