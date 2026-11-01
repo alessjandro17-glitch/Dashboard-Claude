@@ -168,12 +168,48 @@ async function mediaInsights(mediaId: string, tok: string, base: string) {
   return out;
 }
 
+/** Fecha local del servidor (el portátil), no la de la base de datos en UTC. */
+export function localDate(d = new Date()) {
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+// Métricas diarias de la cuenta: columna de account_daily_metrics -> métrica de Instagram.
+export const ACCOUNT_METRICS: Record<string, string> = { reach: 'reach', views: 'views', profile_visits: 'profile_views' };
+
+/** Métricas de la cuenta de un día (total del día). Cada métrica se pide por separado y se omite si Instagram no la da. */
+async function accountDay(node: string, tok: string, base: string, day: Date) {
+  const since = Math.floor(new Date(day.getFullYear(), day.getMonth(), day.getDate()).getTime() / 1000);
+  const until = since + 86400;
+  const out: Record<string, number> = {};
+  for (const [col, metric] of Object.entries(ACCOUNT_METRICS)) {
+    try {
+      const r = await graph(`/${node}/insights`, { metric, period: 'day', metric_type: 'total_value', since: String(since), until: String(until), access_token: tok }, { base });
+      const v = r.data?.[0]?.total_value?.value ?? r.data?.[0]?.values?.[0]?.value;
+      if (typeof v === 'number') out[col] = v;
+    } catch (e) {
+      if (e instanceof GraphError && (e.status === 401 || e.code === 190)) throw e;
+    }
+  }
+  return out;
+}
+
+async function saveAccountDay(db: Db, accountId: string, date: string, vals: Record<string, number>) {
+  const cols = Object.keys(vals);
+  if (!cols.length) return false;
+  await db.query(
+    `insert into account_daily_metrics (account_id, date, source, ${cols.join(', ')}) values ($1, $2, 'instagram', ${cols.map((_, i) => `$${i + 3}`).join(', ')})
+     on conflict (account_id, date) do update set ${cols.map((c) => `${c} = excluded.${c}`).join(', ')}, updated_at = now()`,
+    [accountId, date, ...cols.map((c) => vals[c])]);
+  return true;
+}
+
 const firstLine = (caption: string | undefined) => {
   const line = (caption || '').split('\n').map((s) => s.trim()).find(Boolean) || '';
   return line.length > 90 ? `${line.slice(0, 87)}…` : line;
 };
 
-export interface SyncResult { media_seen: number; reels: number; videos_created: number; snapshots_created: number; unchanged: number; failed: { media_id: string; error: string }[]; followers_count: number | null }
+export interface SyncResult { media_seen: number; reels: number; videos_created: number; snapshots_created: number; unchanged: number; failed: { media_id: string; error: string }[]; followers_count: number | null; account_days: number }
 
 /**
  * Sincroniza: crea los Reels que falten, guarda una medición nueva (fuente «instagram») por Reel
@@ -183,7 +219,7 @@ export interface SyncResult { media_seen: number; reels: number; videos_created:
 export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; maxMedia?: number } = {}): Promise<SyncResult> {
   const { row, token: t0 } = await token(db);
   const tok = await maybeRefresh(db, row, t0);
-  const result: SyncResult = { media_seen: 0, reels: 0, videos_created: 0, snapshots_created: 0, unchanged: 0, failed: [], followers_count: null };
+  const result: SyncResult = { media_seen: 0, reels: 0, videos_created: 0, snapshots_created: 0, unchanged: 0, failed: [], followers_count: null, account_days: 0 };
   try {
     const api = row.config.api === 'facebook' ? 'facebook' : 'instagram';
     const base = baseFor(api);
@@ -192,10 +228,15 @@ export async function syncInstagram(db: Db, opts: { maxAgeDays?: number | null; 
     const account = (await db.query('select id from accounts order by created_at limit 1')).rows[0];
     if (typeof me.followers_count === 'number' && account) {
       result.followers_count = me.followers_count;
-      await db.query(
-        `insert into account_daily_metrics (account_id, date, followers_count, source) values ($1, current_date, $2, 'instagram')
-         on conflict (account_id, date) do update set followers_count = excluded.followers_count, updated_at = now()`,
-        [account.id, me.followers_count]);
+      await saveAccountDay(db, account.id, localDate(), { followers_count: me.followers_count });
+    }
+    // Días completos más recientes (ayer y anteayer; 30 días al sincronizar todo el historial).
+    if (account) {
+      const days = opts.maxAgeDays ? 2 : 30;
+      for (let i = 1; i <= days; i++) {
+        const d = new Date(); d.setDate(d.getDate() - i);
+        if (await saveAccountDay(db, account.id, localDate(d), await accountDay(node, tok, base, d))) result.account_days++;
+      }
     }
     const cutoff = opts.maxAgeDays ? Date.now() - opts.maxAgeDays * 86400_000 : null;
     const max = opts.maxMedia ?? 1000;

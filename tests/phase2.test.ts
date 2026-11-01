@@ -47,6 +47,11 @@ function fakeInstagram(input: any): Promise<Response> {
   if (!tokenValid) return Promise.resolve(json({ error: { message: 'Invalid OAuth access token', code: 190 } }, 400));
   if (u.host === 'graph.facebook.com') {
     if (u.pathname.endsWith('/me/accounts')) return Promise.resolve(json({ error: { message: 'Missing permission pages_show_list', code: 10 } }, 403));
+    if (u.pathname.endsWith('/17841/insights')) {
+      const m = u.searchParams.get('metric');
+      if (m === 'profile_views') return Promise.resolve(json({ error: { message: 'metric not supported', code: 100 } }, 400));
+      return Promise.resolve(json({ data: [{ name: m, period: 'day', total_value: { value: m === 'reach' ? 5000 : 9000 } }] }));
+    }
     if (u.pathname.endsWith('/17841')) return Promise.resolve(json({ id: '17841', username: 'mundo.curioso13', followers_count: 1600 }));
     if (u.pathname.endsWith('/17841/media')) return Promise.resolve(json({ data: [{ id: 'm1', caption: 'Por qué el cielo es azul', media_type: 'VIDEO', media_product_type: 'REELS', permalink: 'https://www.instagram.com/reel/AAA/', timestamp: '2026-10-20T18:00:00+0000' }] }));
   }
@@ -212,6 +217,12 @@ describe('Instagram', () => {
     expect(s.status).toBe(200);
     expect(s.body).toMatchObject({ reels: 1, snapshots_created: 1, followers_count: 1600 });
     expect(igCalls.some((c) => c.startsWith('/v25.0/m1/insights'))).toBe(true);
+    expect(s.body.account_days).toBe(30);
+    const d = new Date(); d.setDate(d.getDate() - 1);
+    const p = (n: number) => String(n).padStart(2, '0');
+    const ayer = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+    const row = (await db.query(`select reach, views, profile_visits from account_daily_metrics where date = $1`, [ayer])).rows[0];
+    expect(row).toEqual({ reach: 5000, views: 9000, profile_visits: null });
   });
   it('desconectar borra el token y conserva las mediciones', async () => {
     const r = await call('POST', '/api/instagram/disconnect');

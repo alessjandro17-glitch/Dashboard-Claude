@@ -184,6 +184,7 @@ function InstagramCard({ onChange }: { onChange: () => void }) {
             <div className="notice">
               {result.reels} Reels revisados · {result.videos_created} videos nuevos · {result.snapshots_created} mediciones nuevas · {result.unchanged} sin cambios
               {result.followers_count !== null && <> · {fmtInt(result.followers_count)} seguidores</>}
+              {result.account_days > 0 && <> · {result.account_days} días de métricas de cuenta</>}
               {result.failed.length > 0 && <> · {result.failed.length} sin métricas. Error: {result.failed[0].error}</>}
             </div>
           )}
